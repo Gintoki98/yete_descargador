@@ -24,6 +24,10 @@ class YouTubeDownloader:
         self.formats = []
         self.selected_format = None
         self.current_focused_button = None
+        # Nueva variable para control de listas
+        self.playlist_mode = False
+        self.current_download_index = 0
+        self.total_downloads = 0
 
         # GUI Elements
         self.create_widgets()
@@ -46,6 +50,18 @@ class YouTubeDownloader:
         # URL Section
         url_frame = tk.Frame(main_frame)
         url_frame.pack(fill=tk.X, pady=(0, 5))  # Reducir padding
+
+        # Añadir checkbox para modo lista
+        self.playlist_check = tk.Checkbutton(url_frame, text="Es lista de reproducción",
+                                             command=self.toggle_playlist_mode)
+        self.playlist_check.pack(anchor=tk.W, pady=(0, 5))
+
+        # Frame para opciones de lista (inicialmente oculto)
+        self.playlist_options_frame = tk.Frame(url_frame)
+
+        tk.Label(self.playlist_options_frame, text="Rango de videos (ej. 1-5):").pack(side=tk.LEFT)
+        self.playlist_range_entry = tk.Entry(self.playlist_options_frame, width=15)
+        self.playlist_range_entry.pack(side=tk.LEFT, padx=5)
 
         tk.Label(url_frame, text="YouTube URL:").pack(anchor=tk.W)
         self.url_entry = tk.Entry(url_frame)
@@ -136,6 +152,13 @@ class YouTubeDownloader:
         button_frame.pack_propagate(False)
         button_frame.config(height=40)
 
+    def toggle_playlist_mode(self):
+        self.playlist_mode = not self.playlist_mode
+        if self.playlist_mode:
+            self.playlist_options_frame.pack(fill=tk.X, pady=(0, 5))
+        else:
+            self.playlist_options_frame.pack_forget()
+
     def browse_location(self):
         directory = filedialog.askdirectory()
         if directory:
@@ -154,17 +177,17 @@ class YouTubeDownloader:
             messagebox.showerror("Error", "Please enter a YouTube URL")
             return
 
-        self.log_to_console(f"Fetching available formats for: {url}")
+        if self.playlist_mode:
+            self.log_to_console(f"Fetching playlist information: {url}")
+        else:
+            self.log_to_console(f"Fetching available formats for: {url}")
 
-        # Disable buttons during fetch
         self.fetch_btn.config(state=tk.DISABLED)
         self.download_btn.config(state=tk.DISABLED)
 
-        # Clear previous formats
         for item in self.format_tree.get_children():
             self.format_tree.delete(item)
 
-        # Fetch formats in a separate thread
         fetch_thread = threading.Thread(target=self._fetch_formats_thread, args=(url,), daemon=True)
         fetch_thread.start()
 
@@ -172,36 +195,99 @@ class YouTubeDownloader:
         try:
             with YoutubeDL() as ydl:
                 info = ydl.extract_info(url, download=False)
-                if 'formats' not in info:
-                    raise Exception("No formats found for this video")
 
-                formats = []
-                for f in info['formats']:
-                    has_video = f.get('vcodec') != 'none'
-                    has_audio = f.get('acodec') != 'none'
+                if self.playlist_mode:
+                    if 'entries' not in info:
+                        raise Exception("This doesn't appear to be a playlist")
 
-                    # Mostrar todos los formatos de video (con o sin audio)
-                    if has_video or has_audio:
-                        resolution = f.get('resolution', 'unknown')
-                        if resolution == 'unknown' and has_video:
-                            resolution = f"{f.get('width', '?')}x{f.get('height', '?')}"
-                        elif not has_video:
-                            resolution = "Audio Only"
+                    playlist_range = self.playlist_range_entry.get().strip()
+                    entries = info['entries']
 
-                        formats.append({
-                            'id': f['format_id'],
-                            'resolution': resolution,
-                            'fps': f.get('fps', 0) or 0,
-                            'ext': f.get('ext', 'unknown'),
-                            'filesize': f.get('filesize', 0) or 0,
-                            'format_note': f.get('format_note', ''),
-                            'vcodec': f.get('vcodec', 'none'),
-                            'acodec': f.get('acodec', 'none'),
-                            'has_video': has_video,
-                            'has_audio': has_audio
-                        })
+                    if playlist_range:
+                        try:
+                            start, end = map(int, playlist_range.split('-'))
+                            entries = entries[start - 1:end]
+                        except:
+                            raise Exception("Invalid range format. Use like: 1-5")
 
-                # Ordenar formatos
+                    if not entries:
+                        raise Exception("No videos found in the specified range")
+
+                    # Obtener el primer video que tenga información válida
+                    first_video = None
+                    for entry in entries:
+                        if entry and 'formats' in entry:
+                            first_video = entry
+                            break
+
+                    if not first_video:
+                        raise Exception("No valid videos found in playlist")
+
+                    self.root.after(0, lambda: self.log_to_console(
+                        f"Playlist detected with {len(entries)} videos. Showing formats for first available video."))
+
+                    # Guardar información de la lista para la descarga
+                    self.playlist_info = {
+                        'entries': entries,
+                        'total': len(entries)
+                    }
+
+                    # Mostrar formatos del primer video
+                    formats = []
+                    for f in first_video['formats']:
+                        has_video = f.get('vcodec') != 'none'
+                        has_audio = f.get('acodec') != 'none'
+
+                        if has_video or has_audio:
+                            resolution = f.get('resolution', 'unknown')
+                            if resolution == 'unknown' and has_video:
+                                resolution = f"{f.get('width', '?')}x{f.get('height', '?')}"
+                            elif not has_video:
+                                resolution = "Audio Only"
+
+                            formats.append({
+                                'id': f['format_id'],
+                                'resolution': resolution,
+                                'fps': f.get('fps', 0) or 0,
+                                'ext': f.get('ext', 'unknown'),
+                                'filesize': f.get('filesize', 0) or 0,
+                                'format_note': f.get('format_note', ''),
+                                'vcodec': f.get('vcodec', 'none'),
+                                'acodec': f.get('acodec', 'none'),
+                                'has_video': has_video,
+                                'has_audio': has_audio
+                            })
+                else:
+                    # Procesamiento normal para video individual
+                    if 'formats' not in info:
+                        raise Exception("No formats found for this video")
+
+                    formats = []
+                    for f in info['formats']:
+                        has_video = f.get('vcodec') != 'none'
+                        has_audio = f.get('acodec') != 'none'
+
+                        if has_video or has_audio:
+                            resolution = f.get('resolution', 'unknown')
+                            if resolution == 'unknown' and has_video:
+                                resolution = f"{f.get('width', '?')}x{f.get('height', '?')}"
+                            elif not has_video:
+                                resolution = "Audio Only"
+
+                            formats.append({
+                                'id': f['format_id'],
+                                'resolution': resolution,
+                                'fps': f.get('fps', 0) or 0,
+                                'ext': f.get('ext', 'unknown'),
+                                'filesize': f.get('filesize', 0) or 0,
+                                'format_note': f.get('format_note', ''),
+                                'vcodec': f.get('vcodec', 'none'),
+                                'acodec': f.get('acodec', 'none'),
+                                'has_video': has_video,
+                                'has_audio': has_audio
+                            })
+
+                # Ordenar formatos (común para ambos modos)
                 def sort_key(x):
                     if not x['has_video']:  # Audio only al final
                         return (1, 0, 0, 0)
@@ -288,6 +374,11 @@ class YouTubeDownloader:
         self.paused = False
         self.cancelled = False
 
+        if self.playlist_mode:
+            self.current_download_index = 0
+            self.total_downloads = self.playlist_info['total']
+            self.log_to_console(f"Starting download of {self.total_downloads} videos...")
+
         self.fetch_btn.config(state=tk.DISABLED)
         self.download_btn.config(state=tk.DISABLED)
         self.pause_btn.config(state=tk.NORMAL)
@@ -295,12 +386,36 @@ class YouTubeDownloader:
 
         self.progress_label.config(text="Preparing download...")
         self.progress_bar["value"] = 0
-        self.log_to_console(f"Starting download with format: {self.selected_format['resolution']}")
 
-        # Start download in a separate thread
-        download_thread = threading.Thread(target=self.download_video, args=(self.selected_format['id'],), daemon=True)
+        download_thread = threading.Thread(target=self.download_video_or_playlist, daemon=True)
         download_thread.start()
         self.pause_btn.focus_set()
+
+    # Nuevo método para manejar descarga de listas
+    def download_video_or_playlist(self):
+        if self.playlist_mode:
+            for i, entry in enumerate(self.playlist_info['entries']):
+                if self.cancelled:
+                    break
+
+                if not entry:  # Saltar entradas vacías
+                    continue
+
+                self.current_download_index = i + 1
+                self.root.after(0, lambda: self.log_to_console(
+                    f"\nDownloading video {self.current_download_index} of {self.total_downloads}"))
+
+                # Obtener la URL del video de la entrada de la lista
+                video_url = entry.get('webpage_url') or entry.get('url')
+                if not video_url:
+                    self.root.after(0, lambda: self.log_to_console(
+                        f"Skipping video {self.current_download_index} - no URL found"))
+                    continue
+
+                # Descargar el video actual
+                self.download_video(self.selected_format['id'], video_url)
+        else:
+            self.download_video(self.selected_format['id'])
 
     def toggle_pause(self):
         if self.paused:
@@ -334,11 +449,11 @@ class YouTubeDownloader:
         self.cancel_btn.config(state=tk.DISABLED)
         self.pause_btn.config(text="Pause")
 
-    def download_video(self, format_id):
-        url = self.url_entry.get()
-        location = self.location_entry.get()
+    def download_video(self, format_id, url=None):
+        if url is None:
+            url = self.url_entry.get()
 
-        # Obtener información del formato seleccionado
+        location = self.location_entry.get()
         selected_format = next((f for f in self.formats if f['id'] == format_id), None)
 
         if not selected_format:
@@ -426,7 +541,15 @@ class YouTubeDownloader:
                     else:
                         stage = "Downloading"
 
-                self.root.after(0, lambda: self.update_progress(percent, speed, eta, stage))
+                # Añadir información de progreso de lista si es aplicable
+                if self.playlist_mode:
+                    stage = f"Video {self.current_download_index}/{self.total_downloads} - {stage}"
+                    overall_percent = ((self.current_download_index - 1) / self.total_downloads) * 100 + (
+                                percent / self.total_downloads)
+                    self.root.after(0, lambda: self.update_progress(overall_percent, speed, eta, stage))
+                else:
+                    self.root.after(0, lambda: self.update_progress(percent, speed, eta, stage))
+
                 self.root.after(0, lambda: self.log_to_console(
                     f"{stage}: {percent:.1f}% | Speed: {speed} | ETA: {eta}"))
 
